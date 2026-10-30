@@ -1,0 +1,24 @@
+# Пример Settings.yml для ImmichFrame: https://immichframe.online/docs/getting-started/configuration
+# Для каждой рамки — свой файл в files/immich/ (имя задаётся в vars/immich.yml → frames).
+General:
+  AuthenticationSecret: 'CHANGE_ME'          # пароль для открытия рамки
+  Language: 'ru'
+  Interval: 60
+  TransitionDuration: 2
+  ShowClock: true
+  ClockFormat: 'HH:mm'
+  ShowPhotoDate: true
+  PhotoDateFormat: 'dd MMMM yyyy'
+  ShowImageLocation: true
+  ImageLocationFormat: 'City,State'
+  WeatherApiKey: ''                          # ключ OpenWeatherMap, если нужна погода
+  WeatherLatLong: ''                         # '55.75,37.62' — координаты для погоды
+  UnitSystem: 'metric'
+  Webcalendars: []                           # ссылки на календари ICS
+  Layout: 'splitview'
+Accounts:
+  - ImmichServerUrl: 'https://photo.example.com'
+    ApiKey: 'CHANGE_ME'                      # ключ API пользователя Immich
+    ShowVideos: true
+    Albums:
+      - 00000000-0000-0000-0000-000000000000

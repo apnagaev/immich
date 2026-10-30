@@ -1,0 +1,26 @@
+# Скопируйте в vars/immich.yml и заполните. Зашифровать: ansible-vault encrypt vars/immich.yml
+# Версии Immich и ImmichFrame — в files/immich/.env.
+
+immich_url: https://photo.example.com
+immich_port: 2283           # порт immich-server на хосте
+ml_port: 3003               # порт machine-learning на хосте; 0 — не проверять
+
+# firewall (nftables): порты Immich доступны только узлам кластера, Docker-сетям и trusted_nets
+firewall: true
+trusted_nets: [10.0.0.0/16] # reverse proxy, мониторинг, внутренняя сеть
+immich_ports: [2283, 3003, 28091, 28092, 28093, 28094]
+
+# Telegram-бот (на обоих узлах, active/passive через файл блокировки)
+telebot_version: main       # ветка или тег https://github.com/apnagaev/telegram-immich-bot
+
+# Фоторамки: каталог настроек, исходный файл в files/immich/, сервис в docker-compose.yaml
+frames:
+  - { name: ap,  src: frameap.yml,  service: immichframeap }
+  - { name: fa,  src: framefa.yml,  service: immichframefa }
+  - { name: mev, src: framemev.yml, service: immichframemev }
+  - { name: mne, src: framemne.yml, service: immichframemne }
+
+# Альбомы по лицам (rbrucker/immich-face-to-album): ключ API пользователя Immich, ID лица и альбома
+immich_api_key: CHANGE_ME
+face_albums:
+  - { name: "Человек 1", face: 00000000-0000-0000-0000-000000000000, album: 00000000-0000-0000-0000-000000000000 }

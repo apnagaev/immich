@@ -1,0 +1,19 @@
+# Ждём, пока Immich на этом узле отвечает: API сервера и машинное обучение.
+- name: Immich server API (/api/server/ping)
+  uri:
+    url: "http://127.0.0.1:{{ immich_port }}/api/server/ping"
+    return_content: yes
+  register: ping
+  until: ping.status == 200 and 'pong' in ping.content
+  retries: 40
+  delay: 3
+
+- name: Immich machine learning (/ping)
+  uri:
+    url: "http://127.0.0.1:{{ ml_port }}/ping"
+    status_code: 200
+  register: mlping
+  until: mlping.status == 200
+  retries: 40
+  delay: 3
+  when: ml_port | default(0) | int > 0
