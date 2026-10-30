@@ -1,0 +1,136 @@
+# Immich на узле кластера: сервер, машинное обучение, фоторамки ImmichFrame, Telegram-бот.
+# Секреты — в .env (подстановка ${...}), immich.env и telebot.env рядом с этим файлом; в compose их нет.
+# Основа: https://github.com/immich-app/immich/releases/latest/download/docker-compose.yml
+# PostgreSQL и Redis — внешние, общие для обоих узлов (DB_URL, REDIS_* в immich.env).
+
+name: immich
+
+x-logging: &logging
+  driver: local                    # журналы контейнеров с ротацией, а не бесконечный json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-frame: &frame
+  image: ghcr.io/immichframe/immichframe:${IMMICHFRAME_VERSION:-latest}
+  restart: unless-stopped          # было on-failure: после перезагрузки хоста рамки не поднимались
+  dns: ["${DNS_SERVER:?set DNS_SERVER in .env}"]
+  networks: [immich_net]
+  logging: *logging
+  environment: &frame-env
+    TZ: Europe/Moscow
+    IMMICHFRAME_CONFIG_PATH: /app/Config/
+    IMMICHFRAME_ADMIN_PASSWORD: ${IMMICHFRAME_ADMIN_PASSWORD:?задайте IMMICHFRAME_ADMIN_PASSWORD в .env}
+
+services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+    depends_on:
+      immich-machine-learning:
+        condition: service_started
+    # extends:                     # аппаратное перекодирование видео: https://immich.app/docs/features/hardware-transcoding
+    #   file: hwaccel.transcoding.yml
+    #   service: quicksync         # nvenc | quicksync | rkmpp | vaapi
+    volumes:
+      - ${UPLOAD_LOCATION:-/immich}/library:/usr/src/app/upload
+      - /etc/localtime:/etc/localtime:ro
+    env_file: [immich.env]
+    ports:
+      - 2283:2283
+    dns: ["${DNS_SERVER:?set DNS_SERVER in .env}"]
+    networks: [immich_net]
+    restart: always
+    logging: *logging
+    healthcheck:
+      disable: false
+
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    # аппаратное ускорение: тег ${IMMICH_VERSION}-openvino / -cuda / -armnn и extends на hwaccel.ml.yml
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}
+    deploy:
+      resources:
+        limits:
+          cpus: '6'
+    ports:
+      - 3003:3003
+    dns: ["${DNS_SERVER:?set DNS_SERVER in .env}"]
+    networks: [immich_net]
+    volumes:
+      - model-cache:/cache
+    env_file: [immich.env]
+    restart: always
+    logging: *logging
+    healthcheck:
+      disable: false
+
+  # Фоторамки: настройки в /immich/frameconf/<имя>/Settings.yml (раскладывает плейбук)
+  immichframeap:
+    <<: *frame
+    container_name: immich_frame_ap
+    ports: ["28091:8080"]
+    volumes: ["/immich/frameconf/ap:/app/Config"]
+
+  immichframefa:
+    <<: *frame
+    container_name: immich_frame_fa
+    ports: ["28092:8080"]
+    environment:
+      <<: *frame-env
+      TZ: Europe/Samara
+    volumes: ["/immich/frameconf/fa:/app/Config"]
+
+  immichframemev:
+    <<: *frame
+    container_name: immich_frame_mev
+    ports: ["28093:8080"]
+    volumes: ["/immich/frameconf/mev:/app/Config"]
+
+  immichframemne:
+    <<: *frame
+    container_name: immich_frame_mne
+    ports: ["28094:8080"]
+    volumes: ["/immich/frameconf/mne:/app/Config"]
+
+  # Telegram-бот загрузки в Immich: https://github.com/apnagaev/telegram-immich-bot
+  # Работает на обоих узлах: active/passive через файл блокировки LOCK_FILE_PATH на общем хранилище
+  # (/import). Файл сессии Telethon у каждого узла свой и лежит на хосте рядом с compose.
+  telegram-immich-bot:
+    image: immichtelebot:latest
+    container_name: telegram-immich-bot
+    restart: unless-stopped
+    logging: *logging
+    env_file: [telebot.env]          # TELEGRAM_TOKEN, TELEGRAM_API_ID, TELEGRAM_API_HASH
+    environment:
+      IMMICH_URL: ${IMMICH_URL:-https://photo.example.com}
+      IMPORT_DIR: /import
+      TZ: Europe/Moscow
+      LOCK_FILE_PATH: /import/lock.lock
+      LOCK_TIMEOUT: 60
+      LOCK_CHECK_INTERVAL: 20
+      MAX_CONCURRENT_TELETHON_DOWNLOADS: 4   # ↓ до 2 при слабом канале
+      MAX_CONCURRENT_EXTRACTS: 2             # ↓ до 1 при медленном диске
+      MAX_CONCURRENT_UPLOADS: 6
+      MAX_CONCURRENT_UPLOADS_PER_JOB: 3
+      MAX_CONCURRENT_JOBS_PER_USER: 2
+      IO_MAX_WORKERS: 16
+      CPU_MAX_WORKERS: 4
+      TEMP_DIR: /tmp/bot_downloads
+    volumes:
+      - ${UPLOAD_LOCATION:-/immich}/telegrambot:/import
+      - ${TELEGRAM_SESSION_FILE:-./telegram.session}:/app/telegram_session.session
+
+volumes:
+  model-cache:
+
+networks:
+  immich_net:
+    ipam:
+      driver: default
+      config:
+        - subnet: "${IMMICH_SUBNET:-172.28.1.160/28}"

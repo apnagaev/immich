@@ -1,0 +1,11 @@
+# секреты и личные данные — только локально или в ansible-vault
+inventory.yml
+vars/immich.yml
+files/immich/.env
+files/immich/immich.env
+files/immich/telebot.env
+files/immich/*.session
+files/immich/frame*.yml
+!files/immich/frame.example.yml
+*.vault
+*.retry

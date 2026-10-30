@@ -1,0 +1,176 @@
+# Immich на двух узлах: сервер, машинное обучение, фоторамки ImmichFrame, Telegram-бот.
+# Узлы обновляются строго по очереди: узел 1 → проверка API → узел 2 → проверка API.
+# Запуск: ansible-playbook -i inventory.yml install_immich.yaml [--ask-vault-pass]
+# Факты (IP) со всех узлов до основного прохода: при serial: 1 Ansible собирает их только с текущего узла,
+# а в правилах firewall нужны адреса обоих (cluster_nodes).
+- name: Gather facts from all nodes
+  hosts: docker
+  gather_facts: yes
+  tasks: []
+
+- name: Immich
+  hosts: docker
+  become: yes
+  serial: 1                                   # по одному узлу: сломанный релиз не уронит оба
+  order: sorted
+  vars_files:
+    - vars/immich.yml                         # пример: vars/immich.example.yml
+  vars:
+    service: immich
+    dir_compose: "/docker-compose/{{ service }}"
+    dir_frames: /immich/frameconf
+    cluster_nodes: "{{ groups['docker'] | map('extract', hostvars, ['ansible_facts', 'default_ipv4', 'address']) | list }}"
+  tasks:
+
+  # ------------------------------------------------------------------ firewall
+  - name: Firewall
+    when: firewall
+    block:
+      - name: Install nftables
+        apt:
+          name: nftables
+          state: present
+
+      - name: Enable nftables at boot (without restart!)
+        systemd:
+          name: nftables
+          enabled: yes
+
+      - name: Include /etc/nftables.d at boot
+        lineinfile:
+          path: /etc/nftables.conf
+          line: 'include "/etc/nftables.d/*.nft"'
+          create: yes
+
+      - name: Create /etc/nftables.d
+        file:
+          path: /etc/nftables.d
+          state: directory
+
+      - name: Render firewall rules
+        template:
+          src: "files/{{ service }}/{{ service }}.nft.j2"
+          dest: "/etc/nftables.d/{{ service }}.nft"
+          validate: "nft -c -f %s"
+        register: nft_rules
+
+      - name: Apply firewall rules
+        command: "nft -f /etc/nftables.d/{{ service }}.nft"
+        when: nft_rules.changed
+
+  # ------------------------------------------------------------------ файлы
+  - name: Compose directory
+    file:
+      path: "{{ dir_compose }}"
+      state: directory
+
+  - name: Frame config directories
+    file:
+      path: "{{ dir_frames }}/{{ item.name }}"
+      state: directory
+      owner: 1000
+      group: 1000
+      mode: '0750'
+    loop: "{{ frames }}"
+    loop_control: { label: "{{ item.name }}" }
+
+  - name: docker-compose.yaml
+    copy:
+      src: "files/{{ service }}/{{ service }}.yaml"
+      dest: "{{ dir_compose }}/docker-compose.yaml"
+      mode: '0644'
+
+  - name: Secrets (.env, immich.env, telebot.env)
+    copy:
+      src: "files/{{ service }}/{{ item }}"
+      dest: "{{ dir_compose }}/{{ item }}"
+      mode: '0600'
+    loop: [.env, immich.env, telebot.env]
+
+  # в Settings.yml рамок лежат ключи API Immich и пароли — только владельцу
+  - name: Frame settings
+    copy:
+      src: "files/{{ service }}/{{ item.src }}"
+      dest: "{{ dir_frames }}/{{ item.name }}/Settings.yml"
+      owner: 1000
+      group: 1000
+      mode: '0600'
+    loop: "{{ frames }}"
+    loop_control: { label: "{{ item.name }}" }
+    register: frame_files
+
+  # ------------------------------------------------------------------ Telegram-бот
+  # Работает на обоих узлах (active/passive через файл блокировки на общем хранилище).
+  # Файл сессии Telethon у каждого узла свой, создаётся на хосте (telethon_session.sh) и не копируется.
+#  - name: copy apn telegram session
+#    copy:
+#      src: 'files/{{ service }}/apn_session.session'
+#      dest: '{{ dir_compose }}/apn_session.session'
+#      mode: '0600'
+
+  - name: telegram-immich-bot source
+    git:
+      repo: https://github.com/apnagaev/telegram-immich-bot
+      dest: "{{ dir_compose }}/immichtelebot"
+      version: "{{ telebot_version }}"
+      force: yes
+    register: telebot_src
+
+  - name: Is the bot image present
+    command: docker image inspect immichtelebot:latest
+    register: telebot_image
+    changed_when: false
+    failed_when: false
+
+  # пересобирать только при изменении кода (или если образа нет)
+  - name: Build immichtelebot
+    community.docker.docker_image_build:
+      name: immichtelebot:latest
+      path: "{{ dir_compose }}/immichtelebot"
+      dockerfile: Dockerfile
+      rebuild: always
+    when: telebot_src.changed or telebot_image.rc != 0
+
+  # ------------------------------------------------------------------ образы и запуск
+  # теги — из docker-compose.yaml и .env; образ бота собирается локально, его не скачиваем
+  - name: Pull images
+    command: docker compose pull --quiet --ignore-buildable --ignore-pull-failures
+    args:
+      chdir: "{{ dir_compose }}"
+    changed_when: false
+
+  # up -d пересоздаёт только изменившиеся контейнеры: без down нет лишнего простоя
+  - name: Start / update containers
+    command: docker compose up -d --remove-orphans
+    args:
+      chdir: "{{ dir_compose }}"
+    register: up
+    changed_when: "'Recreate' in up.stderr or 'Created' in up.stderr"
+
+  - name: Restart frames after settings change
+    command: docker compose restart {{ frames | map(attribute='service') | join(' ') }}
+    args:
+      chdir: "{{ dir_compose }}"
+    when: frame_files.changed
+
+  - name: Wait for Immich on this node
+    include_tasks: tasks/immich-healthcheck.yaml
+
+  # ------------------------------------------------------------------ альбомы по лицам
+  # один раз за запуск (на узле 1); ключ API из vault, в журнал Ansible не попадает
+  - name: Face to album
+    command: >
+      docker run --rm rbrucker/immich-face-to-album
+      --key {{ immich_api_key }} --server {{ immich_url }}
+      --face {{ item.face }} --album {{ item.album }}
+    loop: "{{ face_albums }}"
+    loop_control: { label: "{{ item.name }}" }
+    no_log: true
+    when: (node | int) == 1 and face_albums | length > 0
+    changed_when: false
+
+  # ------------------------------------------------------------------ очистка
+  # только неиспользуемые образы; тома, сети и остановленные контейнеры не трогаем
+  - name: Remove unused images
+    command: docker image prune -a -f
+    changed_when: false
